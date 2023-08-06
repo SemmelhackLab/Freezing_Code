@@ -652,11 +652,8 @@ def draw_threshold(fish_dir, threshold, bandwidth=2):
 
     # perform kernel density estimation
     kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(np.expand_dims(data, 1))
-    # get the log counts
     log_counts = kde.score_samples(np.expand_dims(bin_edges, 1))
-    # convert logarithmic values to absolute counts
     kde_counts = np.exp(log_counts)
-    # find the value of the mode
     mode = bin_edges[np.argmax(kde_counts)]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharex=True, sharey=True)

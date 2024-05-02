@@ -36,19 +36,47 @@ def create_directory(path):
     os.makedirs(path)
     return True
 
+def create_brady_info_pixelwise(fish_dir, ROI):
+    # first create the directory and bradyinfo excel
+    fish = fish_dir[-9:-1]
+    print(fish)
+    date = fish_dir[-27:-19]
+    print(date)
+    vsinfo_dir = glob.glob(fish_dir + 'vsinfo*')
+    vsinfo = pd.read_excel(vsinfo_dir[0])
+    expinfo = pd.read_excel(vsinfo_dir[0], sheet_name='ExpInfo')
+    duration = expinfo.Total_Trial_Duration[0] * expinfo.Stimulus_Frame_Rate[0]
+    bradyinfo = pd.DataFrame()
+    bradyinfo['fish index'] = [fish] * vsinfo.shape[0]
+    bradyinfo['trial index'] = range(1, vsinfo.shape[0] + 1)
+    bradyinfo['roi'] = [ROI] * vsinfo.shape[0]
+    # run quality filter for every trial
+    heart_rate_array = np.zeros((vsinfo.shape[0], duration))
+    quality_list = []
+    for trial in range(1, vsinfo.shape[0] + 1):
+        quality, trace = heart_rate_pixelwise_trace(fish_dir, fish, date, trial, ROI, duration)
+        heart_rate_array[trial - 1, :] = trace
+        quality_list.append(quality)
+    bradyinfo['Good_Pixel_Number'] = quality_list
+    heart_rate_dataframe = pd.DataFrame(heart_rate_array)
 
-def heart_rate_quality_filter(fish_dir, fish, date, trial_index, ROI, duration=1300, starting_sigma=4, max_sigma=13,
-                              rolling_index=9, std_threshold=0.55):
+    bradyinfo_path = fish_dir + 'Bradyinfo_' + date + '_' + fish + '.xlsx'
+    writer = pd.ExcelWriter(bradyinfo_path, engine='xlsxwriter')
+    bradyinfo.to_excel(writer, sheet_name='Bradyinfo', index=False)
+    heart_rate_dataframe.to_excel(writer, sheet_name='heart_rate_trace', index=False)
+    writer.save()
+
+
+def heart_rate_pixelwise_trace(fish_dir, fish, date, trial_index, ROI, duration=2200):
     """
     run averaged pixel activity of a trial and check its quality, also return quality boolean and trace as a list,
     also generate the heart rate plot
     """
     # Read the video
-    heart_video = glob.glob(fish_dir + '*heart_' + str(trial_index) + '.*')
+    heart_video = glob.glob(fish_dir + 'Side_Camera/' + '*heart_' + str(trial_index) + '.*')
     video = cv2.VideoCapture(heart_video[0])
-    # loop to read frame by frame and record intensity of the trial
-    averaged_data = np.zeros(duration)
-    npy_temp = np.zeros(duration)
+    # loop to read frame by frame get a 3d volumn
+    video_array = np.zeros((duration, ROI[3], ROI[2]))
 
     ret = True
     for index in range(0, duration):
@@ -56,13 +84,49 @@ def heart_rate_quality_filter(fish_dir, fish, date, trial_index, ROI, duration=1
         if ret == True:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             crop = gray[ROI[1]:ROI[1] + ROI[3], ROI[0]:ROI[0] + ROI[2]]
-            intensity = np.average(crop)
-            averaged_data[index] = intensity
+            video_array[index, :, :] = crop
+    video.release()
+    good_pixel_array = np.zeros((duration, ROI[3], ROI[2]))
 
+    for x in range(0, ROI[3]):
+        for y in range(0, ROI[2]):
+            pixel_trace = video_array[:, x, y]
+            pixel_index = [x, y]
+            good_pixel_array[:, x, y] = pixel_heart_rate(fish_dir, fish, date, trial_index, pixel_index, pixel_trace,duration)
+
+    averaged_heart_rate = np.zeros(duration)
+    for frame in range(0, duration):
+        pixels_of_frame = good_pixel_array[frame, :, :]
+        good_pixels = pixels_of_frame.ravel()[np.flatnonzero(pixels_of_frame)].tolist()
+        averaged_heart_rate[frame] = np.average(good_pixels)
+
+    plt.figure(figsize=(12, 7))
+    plt.plot(averaged_heart_rate[0:])
+    x1 = np.arange(900, 1300)
+    plt.fill_between(x1, 4, -4, linewidth=1, color='violet', alpha=0.3)
+    plt.ylim(0, 4)
+    print(np.std(averaged_heart_rate))
+    # plt.title('Averaged Heart Rate of T' + str(trial_index) + '_' + fish + '_' + date,fontsize = 20)
+    plt.ylabel('Heart Rate per Minute',fontsize=26)
+    plt.yticks([0,0.5,1,1.5,2,2.5,3,3.5,4],
+               [0, 30,60,90,120,150,180,210,240],fontsize=22)
+    plt.xlabel('Time(Seconds)', fontsize=26)
+    plt.xticks([0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200],
+               [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,12,13,14,15,16,17,18,19,20,21,22], fontsize=22)
+    plt.savefig(fish_dir + 'Side_Camera/' + 'Averaged Heart Rate of_' + date + '_' + fish + '_T' + str(trial_index) + '.png',bbox_inches="tight",dpi=300)
+    #     plt.show()
+
+    return len(good_pixels), averaged_heart_rate
+
+
+def pixel_heart_rate(fish_dir, fish, date, trial_index, pixel_index, pixel_trace, duration=2200, starting_sigma=4,
+                     max_sigma=13, rolling_index=9, std_threshold=0.55):
+    #     print(pixel_index)
+    npy_temp = np.zeros(duration)
     sigma = starting_sigma
     while sigma < max_sigma:
         max_min_idx = True
-        data = gaussian_filter(averaged_data, sigma=sigma)
+        data = gaussian_filter(pixel_trace, sigma=sigma)
         diffed = np.diff(data)
         smoothed = pd.Series(diffed).rolling(rolling_index, min_periods=0, center=True).mean().values
         signed = np.sign(diffed)
@@ -70,8 +134,36 @@ def heart_rate_quality_filter(fish_dir, fish, date, trial_index, ROI, duration=1
         local_maxima = np.where(second_diff < 0)[0] + 1
         local_minima = np.where(second_diff > 0)[0] + 1
 
+        local_max_screen = []
+        local_min_screen = []
+
+        for max_i in range(1, local_maxima.shape[0]):
+            min_between = local_minima[np.where(local_maxima[max_i - 1] < local_minima)]
+            min_between = min_between[np.where(local_maxima[max_i] > min_between)]
+
+            if len(min_between) == 1:
+                local_min_screen.append(min_between[0])
+            if len(min_between) > 1:
+                local_min_screen.append(int(np.average(min_between)))
+
+        for min_i in range(1, local_minima.shape[0]):
+            max_between = local_maxima[np.where(local_minima[min_i - 1] < local_maxima)]
+            max_between = max_between[np.where(local_minima[min_i] > max_between)]
+
+            if len(max_between) == 1:
+                local_max_screen.append(max_between[0])
+            if len(max_between) > 1:
+                local_max_screen.append(int(np.average(max_between)))
+
+        local_maxima = np.asarray(local_max_screen)
+        local_minima = np.asarray(local_min_screen)
+
+        if local_maxima.shape[0] < 5 or local_minima.shape[0] < 5:
+            return np.zeros(duration)
+
+
         # IBI calculation
-        for j in range(1, local_maxima.shape[0]):
+        for j in range(1, len(local_maxima)):
             npy_temp[local_maxima[j - 1]:local_maxima[j]] = 100 / (local_maxima[j] - local_maxima[j - 1])
         npy_temp[0:local_maxima[0]] = 100 / (local_maxima[1] - local_maxima[0])
         npy_temp[local_maxima[j]:] = 100 / (local_maxima[-1] - local_maxima[-2])
@@ -96,95 +188,16 @@ def heart_rate_quality_filter(fish_dir, fish, date, trial_index, ROI, duration=1
                     local_maxima[np.where(local_minima[min_i] < local_maxima)[0][0]]] * 3 / 4 + data[
                     local_minima[min_i + 1]] / 4:
                     max_min_idx = False
-            #         normalized_data = (data-np.min(data))/(np.max(data)-np.min(data))
-            #         std_sum_min_max_temp.append(np.std(normalized_data[local_maxima])+np.std(normalized_data[local_minima]))
-            if max_min_idx:
-                plt.figure(figsize=(10, 4))
-                plt.plot(data)
-                print(np.std(npy_temp))
-                for j in local_maxima:
-                    plt.axvline(j, color='r', alpha=0.2)
-                plt.title('Pixel Activity of T' + str(trial_index) + '_' + fish + '_' + date)
-                plt.ylabel('Pixel Intensity (a.u)')
-                plt.xlabel('Frame')
-                plt.savefig(fish_dir + date + '_' + fish + '_T' + str(trial_index) + '.png')
-                plt.show()
-            else:
-                #                 no_idx.append(trial)
-                plt.figure(figsize=(10, 4))
-                plt.plot(data, color='g')
-                print(np.std(npy_temp))
-                for j in local_maxima:
-                    plt.axvline(j, color='r', alpha=0.2)
-                plt.title('Pixel Activity of T' + str(trial_index) + '_' + fish + '_' + date)
-                plt.ylabel('Pixel Intensity (a.u)')
-                plt.xlabel('Frame')
-                plt.savefig(fish_dir + date + '_' + fish + '_T' + str(trial_index) + '.png')
-                plt.show()
         else:
             max_min_idx = False
-            #             no_idx.append(trial)
-            plt.figure(figsize=(10, 4))
-            plt.plot(data, color='k')
-            print(np.std(npy_temp))
-            for j in local_maxima:
-                plt.axvline(j, color='r', alpha=0.2)
-            plt.title('Pixel Activity of T' + str(trial_index) + '_' + fish + '_' + date)
-            plt.ylabel('Pixel Intensity (a.u)')
-            plt.xlabel('Frame')
-            plt.savefig(fish_dir + date + '_' + fish + '_T' + str(trial_index) + '.png')
-            plt.show()
+
 
         sigma = sigma + 1
         if max_min_idx:
-            video.release()
-            return max_min_idx, npy_temp
-    video.release()
-    return max_min_idx, npy_temp
+            #             print(pixel_index)
+            return npy_temp
+    return np.zeros(duration)
 
-
-def create_brady_info(fish_dir, ROI):
-    # first create the directory and bradyinfo excel
-    fish = fish_dir[-9:-1]
-    print(fish)
-    date = fish_dir[-27:-19]
-    print(date)
-    vsinfo_dir = glob.glob(fish_dir + 'vsinfo*')
-    vsinfo = pd.read_excel(vsinfo_dir[0])
-    expinfo = pd.read_excel(vsinfo_dir[0], sheet_name='ExpInfo')
-    duration = expinfo.Total_Trial_Duration[0] * expinfo.Stimulus_Frame_Rate[0]
-    bradyinfo = pd.DataFrame()
-    bradyinfo['fish index'] = [fish] * vsinfo.shape[0]
-    bradyinfo['trial index'] = range(1, vsinfo.shape[0] + 1)
-    bradyinfo['roi'] = [ROI] * vsinfo.shape[0]
-    # run quality filter for every trial
-    heart_rate_array = np.zeros((vsinfo.shape[0], duration))
-    quality_list = []
-    for trial in range(1, vsinfo.shape[0] + 1):
-        quality, trace = heart_rate_quality_filter(fish_dir, fish, date, trial, ROI)
-        heart_rate_array[trial - 1, :] = trace
-        quality_list.append(quality)
-
-        fig, (ax1) = plt.subplots(1, 1, figsize=(16, 6), sharex=True, sharey=True)
-        ax1.plot(trace, linewidth=3, c='b')
-        x1 = np.arange(900, 1000)
-        plt.fill_between(x1, 4, -4, linewidth=1, color='lightcoral', alpha=0.2)
-        plt.ylim(0, 4)
-        plt.xticks([0, 900, 1000, 1300])  # Set label locations.
-        plt.title('Heart Rate of T' + str(trial))
-        plt.ylabel('Normalized Heart Rate')
-        plt.xlabel('frame')
-        plt.show()
-        fig.savefig(fish_dir + 'Heart Rate of ' + date + '_' + fish + '_T' + str(trial) + '.png', dpi=300)
-
-    bradyinfo['Video_Quality'] = quality_list
-    heart_rate_dataframe = pd.DataFrame(heart_rate_array)
-
-    bradyinfo_path = fish_dir + 'Bradyinfo_' + date + '_' + fish + '.xlsx'
-    writer = pd.ExcelWriter(bradyinfo_path, engine='xlsxwriter')
-    bradyinfo.to_excel(writer, sheet_name='Bradyinfo', index=False)
-    heart_rate_dataframe.to_excel(writer, sheet_name='heart_rate_trace', index=False)
-    writer.save()
 
 def calculate_HR_to_ceiling(bradyinfo_list,median_window_len,max_window_len)
     for bradyinfo_dir in bradyinfo_list:

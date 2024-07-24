@@ -199,7 +199,7 @@ def pixel_heart_rate(fish_dir, fish, date, trial_index, pixel_index, pixel_trace
     return np.zeros(duration)
 
 
-def calculate_HR_to_ceiling(bradyinfo_list,median_window_len,max_window_len)
+def calculate_HR_to_ceiling(bradyinfo_list,median_window_len,max_window_len):
     for bradyinfo_dir in bradyinfo_list:
         heart_rate = pd.read_excel(bradyinfo_dir,sheet_name = 'heart_rate_trace')
         trial_no = heart_rate.shape[0]
